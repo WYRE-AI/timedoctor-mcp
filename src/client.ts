@@ -88,7 +88,15 @@ export async function login(creds: TimeDoctorCredentials): Promise<TokenState> {
   });
 
   if (!res.ok) {
-    if (res.status === 401 || res.status === 409 || res.status === 422 || res.status === 429) {
+    // 429 means Time Doctor is rate-limiting the request, not that the
+    // credentials are wrong — thrown as TimeDoctorApiError (not
+    // TimeDoctorAuthError) specifically so withToken()'s forced-relogin
+    // retry never fires on a rate limit (that would fire a second login
+    // request right when the vendor is asking us to back off).
+    if (res.status === 429) {
+      throw new TimeDoctorApiError('Time Doctor is rate-limiting this request — try again shortly.', res.status);
+    }
+    if (res.status === 401 || res.status === 409 || res.status === 422) {
       throw new TimeDoctorAuthError(`Time Doctor rejected credentials: HTTP ${res.status}`);
     }
     throw new TimeDoctorApiError(`Time Doctor login failed: HTTP ${res.status}`, res.status);

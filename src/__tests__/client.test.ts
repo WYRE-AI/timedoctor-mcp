@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getWorklog, login, listCompanies } from '../client.js';
+import { getWorklog, login, listCompanies, TimeDoctorAuthError, TimeDoctorApiError } from '../client.js';
 import { jsonResponse } from './test-helpers.js';
 
 describe('login', () => {
@@ -58,6 +58,18 @@ describe('login', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({}, 500));
 
     await expect(login({ email: 'user1@example.com', password: 'pass1' })).rejects.toThrow(/HTTP 500/);
+  });
+
+  it('throws TimeDoctorApiError (not TimeDoctorAuthError) on a 429 rate-limit response', async () => {
+    // 429 means Time Doctor is rate-limiting the request, not that the
+    // credentials are wrong -- must not be classified as an auth error,
+    // both for the caller's error message and because withToken()'s
+    // forced-relogin retry only fires on TimeDoctorAuthError (a second
+    // login attempt is exactly the wrong reaction to a rate limit).
+    fetchMock.mockResolvedValueOnce(jsonResponse({}, 429));
+
+    await expect(login({ email: 'user1@example.com', password: 'pass1' })).rejects.toThrow(TimeDoctorApiError);
+    await expect(login({ email: 'user1@example.com', password: 'pass1' })).rejects.not.toThrow(TimeDoctorAuthError);
   });
 });
 
