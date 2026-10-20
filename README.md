@@ -10,14 +10,39 @@ Some Time Doctor accounts require a TOTP (2FA) code at login; accounts with 2FA 
 
 ## Configuration
 
-| Env var | Description |
-|---|---|
-| `TIMEDOCTOR_EMAIL` | Time Doctor account email address. |
-| `TIMEDOCTOR_PASSWORD` | Time Doctor account password. |
-| `MCP_TRANSPORT` | `stdio` (default) or `http`. |
-| `AUTH_MODE` | `env` (default, reads the vars above) or `gateway` (credentials arrive per-request via `X-TimeDoctor-Email` / `X-TimeDoctor-Password` headers, injected by the Conduit gateway). |
-| `CONDUIT_S2S_SECRET` | When set, the HTTP transport requires a valid `X-Gateway-S2S` header (Conduit sidecar auth) on every `/mcp` request. |
-| `LOG_LEVEL` | `debug` \| `info` (default) \| `warn` \| `error`. |
+Copy [`.env.example`](.env.example) and set the variables below.
+
+| Env var | Required | Description |
+|---|---|---|
+| `TIMEDOCTOR_EMAIL` | For stdio and `AUTH_MODE=env` | Time Doctor account email address. |
+| `TIMEDOCTOR_PASSWORD` | For stdio and `AUTH_MODE=env` | Time Doctor account password. |
+| `MCP_TRANSPORT` | No | `stdio` (default) or `http`. |
+| `AUTH_MODE` | No | `gateway` (Docker image and Compose) or `env`. Gateway mode requires `X-TimeDoctor-Email` and `X-TimeDoctor-Password` on each `/mcp` request and never falls back to `TIMEDOCTOR_*`. `env` uses those variables only after S2S auth succeeds. Unset means `env` (stdio and single-tenant HTTP). |
+| `CONDUIT_S2S_SECRET` | Yes for HTTP | Service-to-service secret. The HTTP server logs an error and exits non-zero when this is empty or a known placeholder (`changeme`, `secret`, `replace-me`, `replace-with-a-real-secret`, and the other example values). Generate one with `openssl rand -hex 32`. Compose will not start without it. The value is never logged. |
+| `MCP_ALLOW_INSECURE_DEV` | No | Set to exactly `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. The process logs a warning, does not enforce `X-Gateway-S2S`, and binds `127.0.0.1` only. A non-loopback `MCP_HTTP_HOST` refuses to start. A known placeholder secret still refuses to start. |
+| `MCP_HTTP_HOST` | No | Bind address when a real `CONDUIT_S2S_SECRET` is set. Unset keeps `0.0.0.0`, the historical bind. The image and Compose set `0.0.0.0` inside the container. With no secret, `MCP_ALLOW_INSECURE_DEV=1` forces `127.0.0.1`. |
+| `MCP_HTTP_PORT` | No | HTTP port. Defaults to `8080`. |
+| `LOG_LEVEL` | No | `debug` \| `info` (default) \| `warn` \| `error`. |
+
+`/health` and `/healthz` stay unauthenticated and do not read credentials. The stdio transport does not use `CONDUIT_S2S_SECRET`.
+
+### HTTP authentication
+
+With `MCP_TRANSPORT=http` and `CONDUIT_S2S_SECRET` set, every `/mcp` request must include `X-Gateway-S2S`. The check is `verifyS2sHeader` in [`src/s2s-verify.ts`](src/s2s-verify.ts): the header value is `t=<unix seconds>,v1=<hex>`, where the hex is HMAC-SHA256 of the literal string `t=<unix seconds>` keyed with `CONDUIT_S2S_SECRET` (64 lowercase hex characters). The timestamp must be within 300 seconds of the server clock. A missing or invalid header is HTTP 401, before vendor credentials are read.
+
+```bash
+TS=$(date +%s)
+SIG=$(printf 't=%s' "$TS" | openssl dgst -sha256 -hmac "$CONDUIT_S2S_SECRET" -hex | awk '{print $NF}')
+curl -sS http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "X-Gateway-S2S: t=${TS},v1=${SIG}" \
+  -H "X-TimeDoctor-Email: $TIMEDOCTOR_EMAIL" \
+  -H "X-TimeDoctor-Password: $TIMEDOCTOR_PASSWORD" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+In `AUTH_MODE=gateway`, `/mcp` also requires `X-TimeDoctor-Email` and `X-TimeDoctor-Password`. Those headers are the only credential source for that request. `AUTH_MODE=env` still requires the signed `X-Gateway-S2S` header, then uses `TIMEDOCTOR_EMAIL` and `TIMEDOCTOR_PASSWORD` from the environment.
 
 ## Tools
 
@@ -53,11 +78,46 @@ npm install
 npm run build
 npm test
 npm run lint   # tsc --noEmit
+
+# HTTP refuses to start until CONDUIT_S2S_SECRET is set
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" npm run start:http
+
+# Local HTTP only, without a service-to-service secret (binds 127.0.0.1)
+MCP_ALLOW_INSECURE_DEV=1 MCP_HTTP_HOST=127.0.0.1 npm run start:http
 ```
 
 ## Docker
 
+The image listens on `0.0.0.0` inside the container (`MCP_HTTP_HOST`) and defaults to `AUTH_MODE=gateway`. Publish the port on loopback and pass a real S2S secret. In gateway mode, Time Doctor credentials arrive on each request as headers; they are not read from the environment.
+
 ```bash
 docker build -t timedoctor-mcp .
-docker run -p 8080:8080 -e TIMEDOCTOR_EMAIL=... -e TIMEDOCTOR_PASSWORD=... timedoctor-mcp
+docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -p 127.0.0.1:8080:8080 \
+  timedoctor-mcp
+```
+
+Compose refuses to start when `CONDUIT_S2S_SECRET` is unset. The gateway service sets `AUTH_MODE=gateway`, does not inject `TIMEDOCTOR_EMAIL` or `TIMEDOCTOR_PASSWORD`, and publishes `127.0.0.1:8080:8080`:
+
+```bash
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" docker compose up
+```
+
+Single-tenant HTTP (`AUTH_MODE=env`) still requires the S2S secret, then uses `TIMEDOCTOR_EMAIL` and `TIMEDOCTOR_PASSWORD`. It is separate from the gateway Compose service above.
+
+```bash
+docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -e AUTH_MODE=env \
+  -e TIMEDOCTOR_EMAIL=you@example.com \
+  -e TIMEDOCTOR_PASSWORD=your-password \
+  -p 127.0.0.1:8080:8080 \
+  timedoctor-mcp
+```
+
+Local HTTP without a secret is development-only. It binds `127.0.0.1` and logs a warning. A non-loopback `MCP_HTTP_HOST` (including the image default `0.0.0.0`) makes startup exit:
+
+```bash
+MCP_TRANSPORT=http MCP_HTTP_HOST=127.0.0.1 MCP_ALLOW_INSECURE_DEV=1 npm run start:http
 ```
