@@ -163,7 +163,25 @@ export async function startHttpTransport(): Promise<Server> {
       return;
     }
 
-    // Body cap runs only after S2S passes so unauthenticated callers still get 401.
+    const email = isGatewayMode ? headerValue(req.headers['x-timedoctor-email']) : undefined;
+    const password = isGatewayMode ? headerValue(req.headers['x-timedoctor-password']) : undefined;
+
+    // Gateway mode: credentials must arrive on every request via headers.
+    // Reject explicitly if missing rather than falling through — falling
+    // through would resolve TIMEDOCTOR_* from the process environment.
+    if (isGatewayMode && (!email || !password)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error:
+            'Missing credentials: X-TimeDoctor-Email and X-TimeDoctor-Password headers are required in gateway mode.',
+        })
+      );
+      return;
+    }
+
+    // Body cap runs after the S2S and gateway credential checks so
+    // unauthenticated callers still get 401.
     const contentLength = Number(headerValue(req.headers['content-length']));
     if (Number.isFinite(contentLength) && contentLength > MAX_REQUEST_BODY_BYTES) {
       res.writeHead(413, { 'Content-Type': 'application/json' });
@@ -176,9 +194,6 @@ export async function startHttpTransport(): Promise<Server> {
       );
       return;
     }
-
-    const email = isGatewayMode ? headerValue(req.headers['x-timedoctor-email']) : undefined;
-    const password = isGatewayMode ? headerValue(req.headers['x-timedoctor-password']) : undefined;
 
     const handle = async () => {
       // SECURITY-CRITICAL invariant: this transport MUST stay stateless
@@ -203,20 +218,7 @@ export async function startHttpTransport(): Promise<Server> {
       await transport.handleRequest(req, res);
     };
 
-    // Gateway mode: credentials must arrive on every request via headers.
-    // Reject explicitly if missing rather than falling through — falling
-    // through would resolve TIMEDOCTOR_* from the process environment.
-    if (isGatewayMode) {
-      if (!email || !password) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            error:
-              'Missing credentials: X-TimeDoctor-Email and X-TimeDoctor-Password headers are required in gateway mode.',
-          })
-        );
-        return;
-      }
+    if (isGatewayMode && email && password) {
       await runWithCredentials({ email, password }, handle);
       return;
     }
