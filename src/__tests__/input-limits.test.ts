@@ -62,7 +62,7 @@ describe('countToolInputElements', () => {
 
   it('builds the McpServer-compatible error result', () => {
     expect(toolInputTooLargeResult()).toEqual({
-      content: [{ type: 'text', text: 'Tool input exceeds the maximum of 10000 elements' }],
+      content: [{ type: 'text', text: 'Tool input has more than 10000 values. Send fewer or shorter values.' }],
       isError: true,
     });
   });
@@ -246,7 +246,7 @@ describe('HTTP request limits', () => {
     expect(res.status).toBe(200);
     const result = JSON.parse(res.body).result;
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('maximum of 10000 elements');
+    expect(result.content[0].text).toContain('more than 10000 values. Send fewer or shorter values.');
     expect(result.content[0].text).not.toContain('timedoctor_list_companies');
     expect(dispatchMock).not.toHaveBeenCalled();
   });
